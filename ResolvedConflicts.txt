@@ -1,0 +1,525 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Data;
+using System.Data.Entity;
+using System.Diagnostics.CodeAnalysis;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+using System.Web.Configuration;
+using System.Web.Hosting;
+using LaneContract = CDK.ServiceEdge.MicroServices.Lane.Contract;
+using Lane.Interfaces;
+using CDK.ServiceEdge.Repositories.Helpers;
+using AutoLoop = LoopLib.AutoLoop;
+using LoopLib.Common;
+using Newtonsoft.Json;
+using ServiceBookLib.Repositories;
+using CDK.ServiceEdge.MicroServices.Lane.Contract;
+using CDK.ServiceEdge.MicroServices.Lane.Models;
+using Amazon.DynamoDBv2.DataModel;
+using System.Net.Http;
+using Newtonsoft.Json.Linq;
+using CDK.ServiceEdge.EFRepository.Interfaces.Contexts;
+using ServiceBookLib.Models.Org;
+
+namespace Lane.Provider
+{
+    [ExcludeFromCodeCoverage]
+    public class DealershipSettingsProvider : IDealershipSettingsProvider
+    {
+        private readonly ILoopDbContext _loopDbContext;
+        private readonly IServiceBookDbContext _sbContext;
+        private readonly IConsulConfigurationProvider _configProvider;
+        private static HttpClient _client;
+        //Removed for SVELANE-2157, DO NOT DELETE WILL BE REINTRODUCED LATER IN SVELANE-1823
+        //private DynamoDBContext _dynamoContext;
+        private CommonServicesConfiguration _commonServicesConfig;
+
+        public DealershipSettingsProvider (IServiceBookDbContext sbContext, IConsulConfigurationProvider configProvider, HttpClient client, /*AmazonDynamoClientProvider amazonProvider, Removed for SVELANE-2157, DO NOT DELETE WILL BE REINTRODUCED LATER IN SVELANE-1823*/ ILoopDbContext loopDbContext)
+        {
+            _sbContext = sbContext;
+            _configProvider = configProvider;
+            _client = client;
+            //Removed for SVELANE-2157, DO NOT DELETE WILL BE REINTRODUCED LATER IN SVELANE-1823
+            //_dynamoContext = new DynamoDBContext(amazonProvider.GetAmazonDynamoClient());
+            _loopDbContext = loopDbContext;
+        }
+
+        public async Task<AVRSettings> GetAVRSettings(int companyId)
+        {
+            _commonServicesConfig = _configProvider.GetConfiguration() as CommonServicesConfiguration;
+            AVRSettings settings = new AVRSettings();
+
+            settings.AVREnabled = _sbContext.DealerCrossRefs.Select(x => new { x.EnableAVR, x.LoopCompanyID }).First(x => x.LoopCompanyID == companyId).EnableAVR.Value;
+
+            if (settings.AVREnabled)
+            {
+                settings.XmppServer = _commonServicesConfig.XmppServer;
+                settings.PubSubServer = _commonServicesConfig.PubSubServer;
+
+                settings.XmppUserJid = _sbContext.ConfigParameters.FirstOrDefault(x => x.ModuleName == "XMPP_Settings"
+                                                                                    && x.Parameter == "Username"
+                                                                                    && x.DealerCrossRefID == null
+                                                                                 ).ParameterValue ?? string.Empty;
+
+                settings.XmppPassword = _sbContext.ConfigParameters.FirstOrDefault(x => x.ModuleName == "XMPP_Settings"
+                                                                                     && x.Parameter == "Password"
+                                                                                     && x.DealerCrossRefID == null
+                                                                                  ).ParameterValue ?? string.Empty;
+
+                if (!string.IsNullOrEmpty(settings.XmppUserJid))
+                {
+                    //XMPP Username Jid needs to be in the format {username}@{server}.
+                    //Because the XmppServer is pointing to the servers load balancer (prepended with im.) 
+                    //we need to first remove the im portion before appending the server name to the Jid.
+                    settings.XmppUserJid = string.Format("{0}@{1}", settings.XmppUserJid, settings.XmppServer.Replace("im.", ""));
+                }
+
+                //Added for SVELANE-2157, needs to be removed later in SVELANE-1823
+                settings.AVRTopic = string.Format("{0}.AVREvent", companyId);
+
+                //Removed for SVELANE-2157, DO NOT DELETE WILL BE REINTRODUCED LATER IN SVELANE-1823
+                //IEnumerable<Department> departments = await GetEisDepartment(companyId);
+                //if (departments != null)
+                //{
+                //    settings.AVRTopic = string.Format("{0}.AVREvent", departments.FirstOrDefault().Id);
+                //}
+                //else
+                //{
+                //    throw new Exception("Service department could not be found");
+                //}
+            }
+
+            return settings;
+        }
+
+        //Removed for SVELANE-2157, DO NOT DELETE WILL BE REINTRODUCED LATER IN SVELANE-1823
+        //private async Task<IEnumerable<Department>> GetEisDepartment(int companyId)
+        //{
+        //    //The following code will need to be removed and replaced with the the IAM and EIS service libraries
+        //    //when those NuGet packages become available.
+        //    IEnumerable<Department> depts = null;
+        //    IamUserContext user = null;
+        //    string queryParams = string.Format("externalSystemIdType=serviceEdgeCid&externalSystemId={0}", companyId);
+        //    string url = string.Format("https://{0}/enterpriseInfoService/rest/v0.1/storeDepartments/search.json?{1}", _commonServicesConfig.Domain, queryParams);
+        //    try
+        //    {
+        //        user = await GetServiceUserAsync(_commonServicesConfig.ServiceUser);
+        //        depts = await GetEISResponse<IEnumerable<Department>>(url, "departments", user.AccessToken);
+        //    }
+        //    catch(Exception ex)
+        //    {
+        //        user = RefreshServiceUserAsync(user).Result;
+        //        depts = GetEISResponse<IEnumerable<Department>>(url, "departments", user.AccessToken).Result;
+        //    }
+
+        //    return depts;
+        //}
+
+        //private async Task<T> GetEISResponse<T>(string url, string parentElement, string accessToken)
+        //{
+        //    HttpRequestMessage request = new HttpRequestMessage(HttpMethod.Get, url);
+
+        //    request.Headers.Add("Authorization", string.Format("Bearer {0}", accessToken));
+        //    request.Headers.Accept.TryParseAdd("application/json");
+
+        //    T responseValue = default(T);
+        //    using (var response = await _client.SendAsync(request))
+        //    { //If the status code is 404 not found, skip this block and return null (default(t))
+        //        if (response.StatusCode != System.Net.HttpStatusCode.NotFound)
+        //        {
+        //            response.EnsureSuccessStatusCode();
+
+        //            string responseString = await response.Content.ReadAsStringAsync();
+        //            if (!string.IsNullOrEmpty(responseString))
+        //            { //Deserialize the string to the proper type. For EIS, this will require deserialization begining at the 'parentElement' property.
+        //                JObject jObj = JObject.Parse(responseString);
+        //                responseValue = jObj[parentElement].ToObject<T>();
+        //            }
+        //        }
+        //    }
+
+        //    return responseValue;
+        //}
+
+        //public async Task<IamUserContext> GetServiceUserAsync(string username)
+        //{
+        //    IamUserContext user = await LoadServiceUserAsync(username);
+
+        //    //If the access token has already expired or expires within the next hour, we want to refresh
+        //    if (DateTime.UtcNow >= user.AccessTokenExpirationDate.AddHours(-1))
+        //    {
+        //        user = await RefreshAccessTokenAsync(user);
+        //    }
+
+        //    return user;
+        //}
+
+        //private async Task<IamUserContext> LoadServiceUserAsync(string username)
+        //{
+        //    DynamoDBOperationConfig config = new DynamoDBOperationConfig
+        //    {
+        //        OverrideTableName = _commonServicesConfig.DynamoTableName
+        //    };
+        //    IamUserContext user = await _dynamoContext.LoadAsync<IamUserContext>(username, config);
+
+        //    if (user == null)
+        //    {
+        //        throw new Exception("User not found.");
+        //    }
+
+        //    if (!user.IsServiceUser)
+        //    {
+        //        throw new Exception("Provided user is not a service user.");
+        //    }
+
+        //    return user;
+        //}
+
+        //private async Task<IamUserContext> UpdateServiceUserAsync(IamUserContext user, IamTokenRefreshResponse response)
+        //{
+        //    user.AccessToken = response.AccessToken;
+        //    user.AccessTokenExpirationDate = response.ExpirationTimeStamp;
+        //    user.RefreshTokenExpirationDate = DateTime.UtcNow.AddDays(45);
+
+        //    DynamoDBOperationConfig config = new DynamoDBOperationConfig
+        //    {
+        //        OverrideTableName = _commonServicesConfig.DynamoTableName
+        //    };
+        //    await _dynamoContext.SaveAsync(user, config);
+        //    return await LoadServiceUserAsync(user.Username);
+        //}
+
+        //public async Task<IamUserContext> RefreshServiceUserAsync(IamUserContext user)
+        //{
+        //    IamUserContext updatedUser = await LoadServiceUserAsync(user.Username);
+
+        //    //If the access token has already expired or expires within the next hour, we want to refresh
+        //    if (updatedUser.AccessToken == user.AccessToken || DateTime.UtcNow >= updatedUser.AccessTokenExpirationDate.AddHours(-1))
+        //    {
+        //        updatedUser = await RefreshAccessTokenAsync(updatedUser);
+        //    }
+
+        //    return updatedUser;
+        //}
+
+        //private async Task<IamUserContext> RefreshAccessTokenAsync(IamUserContext user)
+        //{
+        //    string url = string.Format("https://{0}/identityservice/1.1.1/rest/oauth/tokens", _commonServicesConfig.Domain);
+
+        //    IamTokenRefreshResponse responseContent;
+        //    using (var response = await _client.SendAsync(GetTokenRefreshRequest(user, url)))
+        //    {
+        //        response.EnsureSuccessStatusCode();
+
+        //        responseContent = JsonConvert.DeserializeObject<IamTokenRefreshResponse>(
+        //            await response.Content.ReadAsStringAsync()
+        //        );
+        //    }
+
+        //    return await UpdateServiceUserAsync(user, responseContent);
+        //}
+
+        //private HttpRequestMessage GetTokenRefreshRequest(IamUserContext user, string url)
+        //{
+        //    HttpRequestMessage request = new HttpRequestMessage(HttpMethod.Put, url);
+        //    request.Content = new StringContent(
+        //        JsonConvert.SerializeObject(new
+        //        {
+        //            tokenRefresh = new
+        //            {
+        //                accessToken = user.AccessToken,
+        //                refreshToken = user.RefreshToken
+        //            }
+        //        }),
+        //        Encoding.UTF8,
+        //        "application/json"
+        //    );
+
+        //    request.Headers.Add("Authorization", string.Format("Bearer {0}", user.RefreshToken));
+        //    request.Headers.Accept.TryParseAdd("application/json");
+
+        //    return request;
+        //}
+
+        public LaneContract.CompanySettings GetCompanySettings(int companyId, SettingOptions settingOptions = SettingOptions.All)
+        {
+            var companySettings = new CompanySettings();
+            if (settingOptions == SettingOptions.All)
+            {
+                var companyMap = CommonDbHelper.GetCompanyMapByCompanyId(companyId);
+
+                int podId = companyMap.DBPODId;
+                string companyName = companyMap.CompanyName;
+
+                companySettings.CompanyName = companyName;
+
+                var dealershipRepository = new AutoLoop.Repositories.DealershipRepository(companyId);
+                var serviceHours = MapDealershipHoursToHoursOfOperation(dealershipRepository.GetServiceHours());
+                companySettings.ServiceHoursOfOperation = serviceHours;
+
+                var serviceBookDealer = OrgRepository.GetServiceBookDealerByALPDealerID(companyId);
+                companySettings.EnableDealerTireIntegration = serviceBookDealer.EnableDealerTire ?? false;
+                companySettings.EnforceLaneInspection = serviceBookDealer.EnforceLaneInspection;
+                companySettings.EnableLaneInspection = serviceBookDealer.EnableLaneInspection;
+                companySettings.EnableSps = serviceBookDealer.EnableADPSPS;
+
+                companySettings.MakeLaborTypes = GetMakeLaborTypes(companyId);
+
+                var companyProvider = new CompanyProvider();
+                companySettings.DealershipTimezone = companyProvider.GetDealerIanaTimezone(companyId);
+
+                var schedulingRepository = new AutoLoop.Scheduling.AppointmentSchedulingRepository(companyId);
+                var appointmentSettings = schedulingRepository.GetAppointmentSettings();
+                companySettings.AppointmentInterval = appointmentSettings.AppointmentInterval;
+                companySettings.DefaultAppointmentDuration = appointmentSettings.DefaultAppointmentDuration ?? 0;
+                companySettings.EnableAnyAdvisor = appointmentSettings.EnableAnyAdvisor ?? false;
+
+                if (appointmentSettings.DefaultPromiseTime.HasValue)
+                {
+                    companySettings.DefaultPromiseTime = appointmentSettings.DefaultPromiseTime.Value.TimeString();
+                }
+
+                companySettings.DefaultVehicleMake = appointmentSettings.DefaultVehicleMake;
+                companySettings.DefaultTransportId = appointmentSettings.DefaultTransportType;
+
+                SubDomainInfo subDomainInfo = SubDomainInfo.GetByCompanyId(companyId);
+                var themeCss = subDomainInfo.AutoLoopCss;
+                if (themeCss.Contains("."))
+                {
+                    var themeName = themeCss.Substring(0, themeCss.IndexOf(".", StringComparison.Ordinal));
+                    companySettings.Theme = GetThemeWithName(themeName);
+                }
+                else
+                {
+                    companySettings.Theme = GetThemeWithName("default");
+                }
+
+                var storeRepository = new ASRLibrary.Repositories.ASR3.StoreRepository();
+                var storeId = storeRepository.GetStoreIdForCompanyId(companyId);
+                var store = storeRepository.GetByID(storeId);
+                companySettings.AppointmentStartTime = store.ApptStartTime;
+                companySettings.AppointmentEndTime = store.ApptEndTime;
+                var inspectionFormRepository = new ASRLibrary.Repositories.ASR3.InspectionFormRepository();
+                DataSet dsActiveInspectionForms = inspectionFormRepository.InspectionFormGetAllActive(storeId);
+                DataSet dsStoreTriggerOpForms = ASRLibrary.Data.StoreData.StoreGetInspectionForms(storeId, "");
+                if (dsActiveInspectionForms.Tables[0].Rows.Count > 0 && dsStoreTriggerOpForms.Tables[0].Rows.Count > 0)
+                {
+                    var inspectionFormList = (from activeInspectionForm in dsActiveInspectionForms.Tables[0].AsEnumerable()
+                                              join storeTrggerOpForm in dsStoreTriggerOpForms.Tables[0].AsEnumerable() on
+                                                  activeInspectionForm.Field<int>("IFID") equals storeTrggerOpForm.Field<int>("FormId")
+                                                  into selectedForms
+                                              from selectedForm in selectedForms.DefaultIfEmpty()
+                                              select new LaneContract.InspectionForm
+                                              {
+                                                  Id = activeInspectionForm.Field<int>("IFID"),
+                                                  Name = activeInspectionForm.Field<string>("FormName"),
+                                                  TriggerOpCode = selectedForm == null ? "" : selectedForm.Field<string>("TriggerOpCode") ?? "",
+                                                  IsActive = (selectedForm == null) ? false : selectedForm.Field<bool>("Active")
+                                              }).ToList();
+                    companySettings.InspectionForms = inspectionFormList;
+                }
+                DataSet dsStoreInspectionForm = ASRLibrary.Data.StoreData.StoreInspectionFormRulesGet(storeId);
+                if (dsStoreInspectionForm.Tables[0].Rows.Count > 0)
+                {
+                    companySettings.OverridePassword = dsStoreInspectionForm.Tables[0].Rows[0]["OverridePassword"].ToString();
+                }
+                companySettings.EnableESignatureForWorkorders = appointmentSettings.EnableESignatureWorkorders;
+                companySettings.RequireWorkOrderPrint = appointmentSettings.RequireWorkorderPrint;
+                if (store.DefaultLaneInspectionForm > 0)
+                {
+                    ASRLibrary.Models.InspectionForm dsStoreDefaultLaneFormAppData =
+                        inspectionFormRepository.GetLaneAppDataByID(store.DefaultLaneInspectionForm, podId);
+                    if (null != dsStoreDefaultLaneFormAppData.LaneDiagrams && dsStoreDefaultLaneFormAppData.LaneDiagrams.Count > 0)
+                    {
+                        companySettings.WalkAroundConfigured = true;
+                    }
+                }
+                ASRLibrary.Models.InspectionForm dsStoreDefaultLaneFormCategories =
+                    inspectionFormRepository.GetByID(store.DefaultLaneInspectionForm, podId);
+                if (dsStoreDefaultLaneFormCategories.Categories.Count > 0)
+                {
+                    companySettings.LaneInspectConfigured = dsStoreDefaultLaneFormCategories.Categories.Any(c => c.Items.Exists(i => i.ShowInLaneApp == true));
+                }
+                companySettings.VQSetting = GetMBVQSetting(companyId);
+
+                int nadaCompanyId = 0;
+                if (Int32.TryParse(ConfigurationManager.AppSettings["NADACompany"], out nadaCompanyId) && companyId == nadaCompanyId)
+                {
+                    companySettings.AVREnabled = true;
+                    companySettings.AVRTopic = ConfigurationManager.AppSettings["AVRTopic"] ?? string.Empty;
+                    companySettings.XmppUserJid = ConfigurationManager.AppSettings["XmppUserJid"] ?? string.Empty;
+                    companySettings.XmppPassword = ConfigurationManager.AppSettings["XmppPassword"] ?? string.Empty;
+                    companySettings.XmppServer = ConfigurationManager.AppSettings["XmppServer"] ?? string.Empty;
+                    companySettings.PubSubServer = ConfigurationManager.AppSettings["PubSubServer"] ?? string.Empty;
+                }
+                else
+                {
+                    companySettings.AVREnabled = false;
+                }
+                var dealer = OrgRepository.GetServiceBookDealerByALPDealerID(companyId);
+                if (dealer != null)
+                    companySettings.DealerTireDealerCode = dealer.DealerTireDealerCode;
+            }
+            var timezoneHelper = TimeZoneHelper.GetInstanceForCompany(companyId);
+            companySettings.DealershipGeneralTimezone = timezoneHelper.LocalTimeZone.Id;
+            
+            return companySettings;
+        }
+
+        public DateTime ConvertToLocalFromGmt(int companyId, DateTime utcDateTime)
+        {
+            return TimeZoneHelper.GetInstanceForCompany(companyId).ConvertToLocalFromGmt(utcDateTime);
+        }
+
+        public DateTime[] ConvertToLocalFromGmt(int companyId, DateTime[] utcDateTimes)
+        {
+            var timezoneHelper = TimeZoneHelper.GetInstanceForCompany(companyId);
+            var localDateTimes = new DateTime[utcDateTimes.Length];
+            for (var i = 0; i < utcDateTimes.Length; i++)
+            {
+                localDateTimes[i] = timezoneHelper.ConvertToLocalFromGmt(utcDateTimes[i]);
+            }
+            return localDateTimes;
+        }
+
+        private List<MakeLaborType> GetMakeLaborTypes(int companyId)
+        {
+            var laborTypes = SvcRepository.GetALPLaborTypes(companyId);
+            var makeLaborTypes = new List<MakeLaborType>();
+
+            if (laborTypes.Tables.Count <= 0) return makeLaborTypes;
+
+            var laborTypeTable = laborTypes.Tables[0];
+            var makeSet = new HashSet<string>();
+
+            foreach (DataRow row in laborTypeTable.Rows)
+            {
+                var laborType = row["LaborType"].ToString();
+                var laborTypeId = new Guid(row["LaborTypeId"].ToString());
+                var laborTypeMakes = SvcRepository.GetLaborTypeVehicleMakes(laborTypeId, companyId).ToArray();
+                foreach (string make in laborTypeMakes)
+                {
+                    if (!makeSet.Contains(make))
+                    {
+                        makeLaborTypes.Add(new MakeLaborType()
+                        {
+                            Make = make,
+                            LaborType = laborType
+                        });
+                    }
+                    makeSet.Add(make);
+                }
+            }
+            return makeLaborTypes;
+        }
+
+        private List<LaneContract.HoursOfOperation> MapDealershipHoursToHoursOfOperation(
+            AutoLoop.DealershipHours dealershipHours)
+        {
+            var hoursOfOperation = new List<LaneContract.HoursOfOperation>
+            {
+                new LaneContract.HoursOfOperation
+                {
+                    Day = "Monday",
+                    Close = dealershipHours.MondayClose.TimeString(),
+                    Open = dealershipHours.MondayOpen.TimeString()
+                },
+                new LaneContract.HoursOfOperation
+                {
+                    Day = "Tuesday",
+                    Close = dealershipHours.TuesdayClose.TimeString(),
+                    Open = dealershipHours.TuesdayOpen.TimeString()
+                },
+                new LaneContract.HoursOfOperation
+                {
+                    Day = "Wednesday",
+                    Close = dealershipHours.WednesdayClose.TimeString(),
+                    Open = dealershipHours.WednesdayOpen.TimeString()
+                },
+                new LaneContract.HoursOfOperation
+                {
+                    Day = "Thursday",
+                    Close = dealershipHours.ThursdayClose.TimeString(),
+                    Open = dealershipHours.ThursdayOpen.TimeString()
+                },
+                new LaneContract.HoursOfOperation
+                {
+                    Day = "Friday",
+                    Close = dealershipHours.FridayClose.TimeString(),
+                    Open = dealershipHours.FridayOpen.TimeString()
+                },
+                new LaneContract.HoursOfOperation
+                {
+                    Day = "Saturday",
+                    Close = dealershipHours.SaturdayClose.TimeString(),
+                    Open = dealershipHours.SaturdayOpen.TimeString()
+                },
+                new LaneContract.HoursOfOperation
+                {
+                    Day = "Sunday",
+                    Close = dealershipHours.SundayClose.TimeString(),
+                    Open = dealershipHours.SundayOpen.TimeString()
+                }
+            };
+            return hoursOfOperation;
+        }
+
+        private VQSetting GetVQSetting(ServiceBookDealer serviceBookDealer)
+        {
+            return new VQSetting()
+            {
+                EnableMercedesVQ = serviceBookDealer.EnableMercedesVMI,
+                EnableVQ = serviceBookDealer.EnableADPDCS
+            };
+        }
+
+        private LaneContract.Theme GetThemeWithName(string name)
+        {
+            var themePath = HostingEnvironment.MapPath(@"~/Resources/themes.json");
+            if (themePath == null)
+            {
+                return new LaneContract.Theme()
+                {
+                    Name = name
+                };
+            }
+
+            using (StreamReader reader = new StreamReader(themePath))
+            {
+                string json = reader.ReadToEnd();
+                var themes = JsonConvert.DeserializeObject<List<LaneContract.Theme>>(json);
+                var theme = themes.Find(t => String.Equals(t.Name, name, StringComparison.CurrentCultureIgnoreCase)) ?? themes.Find(t => t.Name.ToLower() == "drive");
+                theme.Logo = string.Format("{0}/{1}", WebConfigurationManager.AppSettings["StaticImageServer"],
+                    theme.Logo);
+                return theme;
+            }
+        }
+
+        public async Task<bool> IsCustomerEmailRequiredAsync(int companyId)
+        {
+            var company = await (from c in _loopDbContext.Companies
+                where c.CompanyId == companyId
+                select new
+                {
+                    c.RequireCustomerEmail
+                }).FirstOrDefaultAsync();
+
+            if (company == null)
+            {
+                throw new ArgumentException(string.Format("Could not find company with companyId: {0}", companyId));
+            }
+            return company.RequireCustomerEmail;
+        }
+    }
+
+    public static class DateExtensions
+    {
+        public static string TimeString(this DateTime dateTime)
+        {
+            return dateTime.ToString("HH:mm");
+        }
+    }
+}
